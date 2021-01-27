@@ -1,6 +1,7 @@
 import os
 import torch
 
+
 class Discrim(torch.nn.Module):
     def __init__(self, embed_size, cls_num):
         super().__init__()
@@ -26,13 +27,13 @@ class Discrim(torch.nn.Module):
         )
         return avg_repr
 
-    def forward(self, x, mask):
+    def train_forward(self, x, mask):
         x = self.avg_repr(x, mask)
         x = self.discrim(x)
         x = torch.nn.functional.log_softmax(x, dim=-1)
         return x
 
-    def attr_model_forward(self, avg_repr):
+    def forward(self, avg_repr):
         logits = self.discrim(avg_repr)
         return logits
 
@@ -42,11 +43,11 @@ class Discrim(torch.nn.Module):
             os.mkdir(path)
         torch.save(
             self.state_dict(),
-            f=os.path.join(path, f'descrim_model-{log}.pt')
+            f=os.path.join(path, f'discrim_model-{log}.pt')
         )
 
-    def load_model(self, exp_name, log):
+    def load_model(self, exp_name, filename):
         path = os.path.join('checkpoint', 'discrim', exp_name)
         self.load_state_dict(torch.load(
-            f=os.path.join(path, f'descrim_model-{log}.pt')
+            f=os.path.join(path, filename)
         ))

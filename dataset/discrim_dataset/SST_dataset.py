@@ -5,6 +5,7 @@ from tqdm import tqdm, trange
 from nltk.tokenize.treebank import TreebankWordDetokenizer
 from transformers import GPT2Tokenizer, GPT2LMHeadModel
 
+
 class SSTdataset(torch.utils.data.Dataset):
     def __init__(self, typ='train'):
         super().__init__()
@@ -37,7 +38,7 @@ class SSTdataset(torch.utils.data.Dataset):
             text,
             label,
             fine_grained=True,
-            train_subtrees=False
+            train_subtrees=True
         )
 
         if typ == 'train':
@@ -90,6 +91,7 @@ class SSTdataset(torch.utils.data.Dataset):
         x = padded_seq
 
         return x, y
+
 
 if __name__ == "__main__":
     a = SSTdataset(typ='train')

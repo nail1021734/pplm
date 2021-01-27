@@ -2,6 +2,7 @@ import torch
 from tqdm import trange
 from transformers import GPT2Tokenizer, GPT2LMHeadModel
 
+
 class GPT2(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -11,15 +12,14 @@ class GPT2(torch.nn.Module):
             output_hidden_states=True
         )
         self.embed_size = self.model.transformer.config.hidden_size
+        self.model.eval()
+        for param in self.model.parameters():
+            param.requires_grad = False
 
     def forward(self, x):
         with torch.no_grad():
             x = self.model(x)
         return x
-
-    def get_logits(self, x):
-        x = self(x)
-        return x['logits']
 
     def get_repr(self, x):
         with torch.no_grad():
@@ -40,6 +40,7 @@ class GPT2(torch.nn.Module):
             x += [token.tolist()[-1]]
 
         return self.tokenizer.decode(x)
+
 
 if __name__ == "__main__":
     model = GPT2()
