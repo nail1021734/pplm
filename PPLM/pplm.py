@@ -1,4 +1,5 @@
 import torch
+import os
 import numpy as np
 from operator import add
 from model.gpt2 import GPT2
@@ -68,6 +69,79 @@ class pplm():
 
         return result
 
+    def calc_discrim_loss(
+        self,
+        sum_unpert_repr,
+        new_output,
+        unpert_past,
+        probs,
+        cls_label,
+        repr_num
+    ):
+        # Add x_t+1 repr to discrim input
+        discrim_input = sum_unpert_repr +\
+            new_output['hidden_states'][-1].sum(dim=1).detach()
+
+        # Calc distrim model loss
+        ce_loss = torch.nn.CrossEntropyLoss()
+
+        # Get gpt word embedding
+        wte = self.gpt_model.model.resize_token_embeddings()
+        input_embed = torch.matmul(probs, wte.weight.data)
+
+        # Get perturb gpt output(x_t+2)
+        pert_output = self.gpt_model.model(
+            past_key_values=unpert_past,
+            inputs_embeds=input_embed
+        )
+
+        pert_last_hidden = pert_output['hidden_states'][-1]
+        discrim_input = discrim_input + pert_last_hidden.sum(dim=1)
+        discrim_input = discrim_input / (repr_num)
+
+        # Calc discrim loss
+        pred = self.attr_model(discrim_input)
+        label = torch.LongTensor(
+            [cls_label]
+        ).to(device)
+        discrim_loss = ce_loss(pred, label)
+        return discrim_loss
+
+    def get_BoW_words(self, cls_list):
+        word_list = []
+        dir_path = 'BoW'
+        for topic in cls_list:
+            with open(
+                os.path.join(dir_path, topic+'.txt'), 'r', encoding='utf8'
+            ) as input_files:
+                words = input_files.readlines()
+            for word in words:
+                word_list.append(word.strip())
+
+        return word_list
+
+    def get_one_hot_vectors(self, word_list):
+        bow_index = [self.gpt_model.tokenizer.encode(
+            word,
+            add_prefix_space=True,
+            add_special_tokens=False
+        ) for word in word_list]
+        bow_index = torch.tensor(bow_index).to(self.device)
+        one_hot_vector = torch.zeros(
+            bow_index.shape[0],
+            self.gpt_model.tokenizer.vocab_size
+        ).to(self.device)
+        one_hot_vector.scatter_(1, bow_index, 1)
+        return one_hot_vector
+
+    def calc_BoW_loss(self, probs, bow_one_hot_vec):
+        bow_logits = torch.mm(
+            probs.squeeze(dim=1),
+            bow_one_hot_vec.T
+        )
+        bow_loss = -torch.log(bow_logits.sum(dim=-1))
+        return bow_loss[0]
+
     def get_pert_past(
         self,
         unpert_output,
@@ -75,6 +149,7 @@ class pplm():
         past_key_values,
         max_iter,
         cls_label,
+        classifier
     ):
         SMALL_CONST = 1e-10
 
@@ -113,7 +188,6 @@ class pplm():
             for p in past_key_values
         ]
 
-        discrim_input = None
         # Repeat perturb past_key_value `max_iter` times.
         for _ in range(max_iter):
             curr_perturbation = [
@@ -134,36 +208,22 @@ class pplm():
                 dim=-1
             ).unsqueeze(dim=1)
 
-            # Add x_t+1 repr to discrim input
-            discrim_input = sum_unpert_repr +\
-                new_output['hidden_states'][-1].sum(dim=1).detach()
-
             loss = 0.0
-
-            # Calc distrim model loss
-            ce_loss = torch.nn.CrossEntropyLoss()
-
-            # Get gpt word embedding
-            wte = self.gpt_model.model.resize_token_embeddings()
-            input_embed = torch.matmul(probs, wte.weight.data)
-
-            # Get perturb gpt output(x_t+2)
-            pert_output = self.gpt_model.model(
-                past_key_values=unpert_past,
-                inputs_embeds=input_embed
-            )
-
-            pert_last_hidden = pert_output['hidden_states'][-1]
-            discrim_input = discrim_input + pert_last_hidden.sum(dim=1)
-            discrim_input = discrim_input / (unpert_last_hidden.shape[1] + 1)
-
-            # Calc discrim loss
-            pred = self.attr_model(discrim_input)
-            label = torch.LongTensor(
-                [cls_label]
-            ).to(device)
-            discrim_loss = ce_loss(pred, label)
-            loss += discrim_loss
+            if classifier == "discrim":
+                discrim_loss = self.calc_discrim_loss(
+                    sum_unpert_repr=sum_unpert_repr,
+                    new_output=new_output,
+                    unpert_past=unpert_past,
+                    probs=probs,
+                    cls_label=cls_label,
+                    repr_num=unpert_last_hidden.shape[1] + 1
+                )
+                loss += discrim_loss
+            elif classifier == "BoW":
+                word_list = self.get_BoW_words(cls_label.split(','))
+                one_hot_vector = self.get_one_hot_vectors(word_list)
+                BoW_loss = self.calc_BoW_loss(probs, one_hot_vector)
+                loss += BoW_loss
 
             # Calc KL_divergence
             if self.kl_scale > 0.0:
@@ -226,7 +286,8 @@ class pplm():
         prefix,
         max_iter,
         cls_label,
-        k
+        k,
+        classifier
     ):
         x = torch.tensor([prefix]).to(self.device)
 
@@ -245,7 +306,8 @@ class pplm():
             last=last,
             past_key_values=past_key_values,
             max_iter=max_iter,
-            cls_label=cls_label
+            cls_label=cls_label,
+            classifier=classifier
         )
 
         pert_output = self.gpt_model.model(last, past_key_values=pert_past)
@@ -281,7 +343,8 @@ class pplm():
         pplm_iteration,
         prefix,
         k,
-        label
+        label,
+        classifier
     ):
         prefix = [50256] + self.gpt_model.tokenizer.encode(prefix)
 
@@ -290,16 +353,14 @@ class pplm():
                 prefix=prefix,
                 max_iter=pplm_iteration,
                 cls_label=label,
-                k=k
+                k=k,
+                classifier=classifier
             )
             prefix += [text]
 
         result = self.gpt_model.tokenizer.decode(prefix)
 
         return result
-
-    def run_pplm(self, output_so_far):
-        pass
 
 
 if __name__ == "__main__":
@@ -310,7 +371,7 @@ if __name__ == "__main__":
     #     torch.load('checkpoint/discrim/1/discrim_model-paper.pt', map_location=device))
     attribute_model = Discrim(embed_size=gpt.embed_size, cls_num=5).to(device)
     attribute_model.load_model(
-        '1', 'discrim_model-lr_0.0001_epoch_5_loss0.5655118515209866.pt')
+        '1', 'discrim_model-epoch_29_loss0.533.pt')
 
     text = pplm(attribute_model, gpt, window_size=10, kl_scale=0.01,
                 gamma=1.0, step_size=0.05, gm_scale=0.95, sample=True, device=device)
@@ -319,8 +380,8 @@ if __name__ == "__main__":
     # for i in range(4):
     #     print(text.generate_full_text(max_length=20, pplm_iteration=10, prefix="My dog died", k=40, label=3))
     print('unpert:', text.unpert_generate(
-        prefix='This apple', max_length=40, k=40))
-    print('pos:', text.generate_full_text(max_length=40,
-                                          pplm_iteration=40, prefix="This apple", k=40, label=2))
-    print('neg:', text.generate_full_text(max_length=40,
-                                          pplm_iteration=40, prefix="This apple", k=40, label=3))
+        prefix='The dog', max_length=30, k=40))
+    print('pos:', text.generate_full_text(max_length=30,
+                                          pplm_iteration=10, prefix="The dog", k=40, label="space", classifier="BoW"))
+    print('neg:', text.generate_full_text(max_length=30,
+                                          pplm_iteration=40, prefix="The dog", k=40, label=3, classifier="discrim"))
